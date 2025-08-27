@@ -1,0 +1,77 @@
+# Remove the 'version:' line entirely when using modern `docker compose`
+
+services:
+  opensearch:
+    image: public.ecr.aws/opensearchproject/opensearch:2
+    environment:
+      discovery.type: "single-node"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=50s"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [tracing-net]
+
+  jaeger-collector:
+    image: quay.io/jaegertracing/jaeger-collector:1.72.0
+    restart: unless-stopped
+    environment:
+      SPAN_STORAGE_TYPE: "elasticsearch"
+      ES_SERVER_URLS: "http://opensearch:9200"
+      ES_VERSION: "7"
+      ES_TAGS_AS_FIELDS_ALL: "true"
+      ES_NUM_SHARDS: "1"
+      ES_NUM_REPLICAS: "0"
+      COLLECTOR_OTLP_ENABLED: "true"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    networks: [tracing-net]
+
+  jaeger-query:
+    image: quay.io/jaegertracing/jaeger-query:1.72.0
+    restart: unless-stopped
+    environment:
+      SPAN_STORAGE_TYPE: "elasticsearch"
+      ES_SERVER_URLS: "http://opensearch:9200"
+      ES_VERSION: "7"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "16686:16686"
+    networks: [tracing-net]
+
+  sample-app:
+    build: ./sample-app
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger-collector:4318"
+      OTEL_SERVICE_NAME: "sample-app"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=dev,service.version=1.0.0"
+    depends_on:
+      jaeger-collector:
+        condition: service_started
+    ports:
+      - "5000:5000"
+    networks: [tracing-net]
+
+networks:
+  tracing-net:
+    driver: bridge
+
+volumes:
+  opensearch-data: {}
